@@ -1,0 +1,153 @@
+service: shortlinker
+frameworkVersion: "3"
+
+useDotenv: true
+
+custom:
+  esbuild:
+    bundle: true
+    minify: false
+
+plugins:
+  - serverless-dotenv-plugin
+  - serverless-esbuild
+
+provider:
+  name: aws
+  runtime: nodejs18.x
+  iam:
+    role: MainRole
+  environment:
+    DYNAMODB_USERS_TABLE: ${self:service}-usersTable-${sls:stage}
+    DYNAMODB_LINKS_TABLE: ${self:service}-linksTable-${sls:stage}
+    THE_QUEUE_URL: { Ref: TheQueue }
+    JWT_SECRET: ${env:JWT_SECRET}
+    STAGE: ${sls:stage}
+    REGION: ${aws:region}
+    ACCOUNT_ID: ${aws:accountId}
+    DEPLOYMENT_URL: !Sub "https://${ApiGatewayRestApi}.execute-api.${aws:region}.amazonaws.com/${sls:stage}/"
+
+functions:
+  verifyToken:
+    handler: src/utils/token.verifyToken
+  registerUser:
+    handler: src/auth/registerUser.register
+    events:
+      - http:
+          path: /register
+          method: post
+  loginUser:
+    handler: src/auth/loginUser.login
+    events:
+      - http:
+          path: /login
+          method: post
+  createShortLink:
+    handler: src/link/createShortLink.createShortLink
+    events:
+      - http:
+          path: /
+          method: post
+          authorizer:
+            name: verifyToken
+  redirectShortLink:
+    handler: src/link/redirectShortLink.redirectShortLink
+    events:
+      - http:
+          path: /{id}
+          method: get
+  listUserLinks:
+    handler: src/link/listUserLinks.listUserLinks
+    events:
+      - http:
+          path: /links
+          method: get
+          cors: true
+          authorizer:
+            name: verifyToken
+  deleteExpiredLinks:
+    handler: src/link/deleteExpiredLinks.deleteExpiredLinks
+  deleteLinkByID:
+    handler: src/link/deleteLinkByID.deleteLinkByID
+    events:
+      - http:
+          path: /{id}
+          method: delete
+          cors: true
+          authorizer: verifyToken
+
+resources:
+  Resources:
+    MainRole:
+      Type: AWS::IAM::Role
+      Properties:
+        RoleName: MainRole
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service:
+                  - lambda.amazonaws.com
+                  - events.amazonaws.com
+                  - scheduler.amazonaws.com
+              Action: sts:AssumeRole
+              Condition:
+                StringEquals:
+                  aws:SourceAccount: ${aws:accountId}
+        Policies:
+          - PolicyName: mainPolicy
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: "Allow"
+                  Action:
+                    - dynamodb:PutItem
+                    - dynamodb:Get*
+                    - dynamodb:Scan*
+                    - dynamodb:UpdateItem
+                    - dynamodb:DeleteItem
+                    - dynamodb:BatchWriteItem
+                    - sqs:*
+                    - scheduler:*
+                    - iam:PassRole
+                    - lambda:InvokeFunction
+                  Resource:
+                    - arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/${self:service}-usersTable-${sls:stage}
+                    - arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/${self:service}-linksTable-${sls:stage}
+                    - arn:aws:sqs:${aws:region}:${aws:accountId}:TheQueue
+                    - arn:aws:scheduler:${aws:region}:${aws:accountId}:*
+                    - arn:aws:iam::${aws:accountId}:role/MainRole
+                    - arn:aws:lambda:${aws:region}:${aws:accountId}:function:shortlinker-dev-deleteExpiredLinks:*
+                    - arn:aws:lambda:${aws:region}:${aws:accountId}:function:shortlinker-dev-deleteExpiredLinks
+
+    TheQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: TheQueue
+    DeleteLinkGroup:
+      Type: AWS::Scheduler::ScheduleGroup
+      Properties:
+        Name: deleteLink
+    UsersTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        AttributeDefinitions:
+          - AttributeName: primary_key
+            AttributeType: S
+        BillingMode: PAY_PER_REQUEST
+        KeySchema:
+          - AttributeName: primary_key
+            KeyType: HASH
+        TableName: ${self:service}-usersTable-${sls:stage}
+    LinksTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: id
+            AttributeType: S
+        KeySchema:
+          - AttributeName: id
+            KeyType: HASH
+        TableName: ${self:service}-linksTable-${sls:stage}
